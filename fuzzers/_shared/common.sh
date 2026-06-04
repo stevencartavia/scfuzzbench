@@ -492,6 +492,23 @@ install_base_packages() {
   fi
 }
 
+ensure_python_pip() {
+  if python3 -m pip --version >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if command -v apt-get >/dev/null 2>&1 && [[ "$(id -u)" -eq 0 ]]; then
+    log "Installing python3-pip"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y
+    apt-get install -y python3-pip
+  elif python3 -m ensurepip --upgrade >/dev/null 2>&1; then
+    log "Bootstrapped pip with ensurepip"
+  fi
+
+  python3 -m pip --version
+}
+
 install_foundry() {
   if [[ -n "${FOUNDRY_GIT_REPO:-}" ]]; then
     log "Installing Foundry from ${FOUNDRY_GIT_REPO}"
@@ -546,12 +563,14 @@ install_foundry() {
 
 install_crytic_compile() {
   log "Installing crytic-compile"
+  ensure_python_pip
   python3 -m pip install --no-cache-dir --break-system-packages crytic-compile
   command -v crytic-compile
 }
 
 install_slither_analyzer() {
   log "Installing slither-analyzer"
+  ensure_python_pip
   python3 -m pip install --no-cache-dir --break-system-packages --ignore-installed slither-analyzer
   command -v slither
 }
