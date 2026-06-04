@@ -499,7 +499,7 @@ install_foundry() {
       export HOME=/root
     fi
     local foundry_build_profile="${FOUNDRY_BUILD_PROFILE:-dist}"
-    local foundry_rust_toolchain="${FOUNDRY_RUST_TOOLCHAIN:-1.91.0}"
+    local foundry_rust_toolchain="${FOUNDRY_RUST_TOOLCHAIN:-1.96.0}"
     if ! command -v rustup >/dev/null 2>&1; then
       log "Installing Rust toolchain manager"
       curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
