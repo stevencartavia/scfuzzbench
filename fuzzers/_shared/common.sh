@@ -133,6 +133,13 @@ set_default_worker_env() {
   export "${var_name}"
 }
 
+log_worker_identity() {
+  local fuzzer_name=$1
+  local worker_var_name=$2
+  cache_instance_id || true
+  log "Worker id: fuzzer=${fuzzer_name} label=${SCFUZZBENCH_FUZZER_LABEL:-unknown} instance_id=${SCFUZZBENCH_INSTANCE_ID:-unknown} run_id=${SCFUZZBENCH_RUN_ID:-local} benchmark_uuid=${SCFUZZBENCH_BENCHMARK_UUID:-none} ${worker_var_name}=${!worker_var_name:-unknown}"
+}
+
 is_sensitive_arg_name() {
   local name="${1:-}"
   name="${name,,}"

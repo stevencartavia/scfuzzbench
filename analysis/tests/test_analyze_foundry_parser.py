@@ -76,7 +76,7 @@ class FoundryParserTests(unittest.TestCase):
         events = analyze.parse_foundry_log(log_path, "run-1", "i-1", "foundry-git-test")
         self.assertEqual(
             [event.event for event in events],
-            ["assert_canary_ASSERTION_CANARY", "invariant_canary"],
+            ["assert_canary", "CryticToFoundry"],
         )
         self.assertEqual(
             [event.source for event in events],
@@ -84,6 +84,18 @@ class FoundryParserTests(unittest.TestCase):
         )
         self.assertAlmostEqual(events[0].elapsed_seconds, 0.0)
         self.assertAlmostEqual(events[1].elapsed_seconds, 3.0)
+
+    def test_dedupes_assertion_handler_suffixes(self):
+        log_path = self.write_log(
+            [
+                '{"timestamp":300,"event":"failure","target":"CryticToFoundry:deposit_ASSERTION_BALANCE","type":"assertion"}',
+                '{"timestamp":301,"event":"failure","target":"CryticToFoundry:deposit_ASSERTION_SUPPLY","type":"assertion"}',
+            ]
+        )
+
+        events = analyze.parse_foundry_log(log_path, "run-1", "i-1", "foundry-git-test")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event, "deposit")
 
     def test_parses_throughput_from_json_cumulative_metrics(self):
         log_path = self.write_log(

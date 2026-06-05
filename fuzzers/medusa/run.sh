@@ -32,6 +32,7 @@ log "Cleaning corpus directory ${SCFUZZBENCH_CORPUS_DIR}"
 rm -rf "${SCFUZZBENCH_CORPUS_DIR:?}"/*
 
 set_default_worker_env MEDUSA_WORKERS
+log_worker_identity "medusa" "MEDUSA_WORKERS"
 
 cmd=(medusa fuzz --no-color)
 if [[ -n "${MEDUSA_CONFIG:-}" ]]; then

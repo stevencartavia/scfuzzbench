@@ -35,6 +35,7 @@ if [[ -n "${FOUNDRY_TEST_ARGS:-}" ]]; then
 fi
 
 set_default_worker_env FOUNDRY_THREADS
+log_worker_identity "foundry" "FOUNDRY_THREADS"
 if [[ -n "${FOUNDRY_THREADS:-}" ]]; then
   has_threads_arg=0
   for arg in "${extra_args[@]}"; do

@@ -440,7 +440,18 @@ def normalize_foundry_failure_name(value: Any) -> Optional[str]:
         contract_name, function_name = name.split(":", 1)
         if contract_name and function_name:
             name = function_name.strip()
+    if name.endswith("()"):
+        name = name[:-2]
     return name or None
+
+
+def normalize_failure_event_name(name: str, failure_type: Optional[str] = None) -> str:
+    if name == "invariant_canary" and failure_type == "invariant":
+        return "CryticToFoundry"
+    assertion_marker = "_ASSERTION_"
+    if assertion_marker in name:
+        return name.split(assertion_marker, 1)[0]
+    return name
 
 
 def extract_foundry_failure(payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[float], Optional[str]]:
@@ -450,14 +461,15 @@ def extract_foundry_failure(payload: Dict[str, Any]) -> Tuple[Optional[str], Opt
         return None, None, None
 
     if str(payload.get("event") or "").strip() == "failure":
+        failure_type = str(payload.get("type") or "").strip() or None
         target_name = normalize_foundry_failure_name(payload.get("target"))
         if target_name:
-            return target_name, ts_value, "foundry-failure-event"
+            return normalize_failure_event_name(target_name, failure_type), ts_value, "foundry-failure-event"
 
     if str(payload.get("type") or "").strip() == "invariant_failure":
         invariant_name = normalize_foundry_failure_name(payload.get("invariant"))
         if invariant_name:
-            return invariant_name, ts_value, "foundry-invariant-failure"
+            return normalize_failure_event_name(invariant_name, "invariant"), ts_value, "foundry-invariant-failure"
 
     return None, ts_value, None
 
@@ -1037,6 +1049,9 @@ def load_events_csv(path: Path) -> List[Event]:
 
 
 def write_throughput_samples_csv(samples: Iterable[ThroughputSample], out_path: Path) -> None:
+    def fmt(value: float) -> str:
+        return f"{value:.2f}"
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", newline="") as handle:
         writer = csv.writer(handle)
@@ -1061,8 +1076,8 @@ def write_throughput_samples_csv(samples: Iterable[ThroughputSample], out_path: 
                     sample.fuzzer,
                     sample.fuzzer_label,
                     f"{sample.elapsed_seconds:.3f}",
-                    "" if sample.tx_per_second is None else f"{sample.tx_per_second:.6f}",
-                    "" if sample.gas_per_second is None else f"{sample.gas_per_second:.6f}",
+                    "" if sample.tx_per_second is None else fmt(sample.tx_per_second),
+                    "" if sample.gas_per_second is None else fmt(sample.gas_per_second),
                     sample.source,
                     sample.log_path,
                 ]
@@ -1099,7 +1114,7 @@ def write_throughput_summary_csv(samples: Iterable[ThroughputSample], out_path: 
             run_state["gas_elapsed"] = sample.elapsed_seconds
 
     def fmt(value: float) -> str:
-        return f"{value:.6f}"
+        return f"{value:.2f}"
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", newline="") as handle:

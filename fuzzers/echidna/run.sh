@@ -47,6 +47,7 @@ rm -rf "${corpus_dir:?}"
 mkdir -p "${corpus_dir}"
 
 set_default_worker_env ECHIDNA_WORKERS
+log_worker_identity "echidna" "ECHIDNA_WORKERS"
 
 if [[ -z "${ECHIDNA_CONFIG:-}" && -z "${ECHIDNA_TARGET:-}" ]]; then
   log "Set ECHIDNA_CONFIG or ECHIDNA_TARGET (and ECHIDNA_CONTRACT if needed)."

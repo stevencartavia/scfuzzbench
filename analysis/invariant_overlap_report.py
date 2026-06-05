@@ -65,6 +65,8 @@ def normalize_invariant_name(value: str) -> str:
     if name.startswith(FOUNDRY_ASSERTION_WRAPPER_PREFIX):
         name = name[len(FOUNDRY_ASSERTION_WRAPPER_PREFIX) :]
     name = ASSERTION_SUFFIX_RE.sub("", name)
+    if name == "invariant_canary":
+        name = "CryticToFoundry"
     return name.strip()
 
 
