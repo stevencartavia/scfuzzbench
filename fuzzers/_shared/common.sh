@@ -522,11 +522,13 @@ install_foundry() {
     cargo +"${foundry_rust_toolchain}" build \
       --locked \
       --profile "${foundry_build_profile}" \
+      --package forge \
+      --bin forge \
+      --package cast \
+      --bin cast \
       --manifest-path "${tmp_dir}/foundry/Cargo.toml"
     install -m 0755 "${tmp_dir}/foundry/target/${foundry_build_profile}/forge" "${SCFUZZBENCH_BIN_DIR}/forge"
     install -m 0755 "${tmp_dir}/foundry/target/${foundry_build_profile}/cast" "${SCFUZZBENCH_BIN_DIR}/cast"
-    install -m 0755 "${tmp_dir}/foundry/target/${foundry_build_profile}/anvil" "${SCFUZZBENCH_BIN_DIR}/anvil"
-    install -m 0755 "${tmp_dir}/foundry/target/${foundry_build_profile}/chisel" "${SCFUZZBENCH_BIN_DIR}/chisel" || true
     echo "${commit}" > "${SCFUZZBENCH_ROOT}/foundry_commit"
     echo "${FOUNDRY_GIT_REPO}" > "${SCFUZZBENCH_ROOT}/foundry_repo"
     rm -rf "${tmp_dir}"
