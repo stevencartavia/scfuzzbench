@@ -489,11 +489,27 @@ def extract_foundry_failure(payload: Dict[str, Any]) -> Tuple[Optional[str], Opt
     return None, ts_value, None
 
 
+def extract_foundry_failure_totals(payload: Dict[str, Any]) -> Tuple[Optional[float], Optional[int], Optional[int]]:
+    ts_value = parse_optional_float(payload.get("timestamp"))
+    metrics = payload.get("metrics")
+    if not isinstance(metrics, dict):
+        return ts_value, None, None
+
+    unique_failures = parse_optional_float(metrics.get("unique_failures"))
+    broken_handlers = parse_optional_float(metrics.get("broken_handlers"))
+    return (
+        ts_value,
+        None if unique_failures is None else int(unique_failures),
+        None if broken_handlers is None else int(broken_handlers),
+    )
+
+
 def parse_foundry_log(
     path: Path, run_id: str, instance_id: str, fuzzer_label: str
 ) -> List[Event]:
     events: List[Event] = []
     seen = set()
+    synthetic_handler_count = 0
     first_ts: Optional[float] = None
     last_elapsed: Optional[float] = None
     with path.open("r", errors="ignore") as handle:
@@ -531,6 +547,32 @@ def parse_foundry_log(
                                     event=event_name,
                                     elapsed_seconds=ts_value - (first_ts or ts_value),
                                     source=source,
+                                    log_path=str(path),
+                                )
+                            )
+                    totals_ts, unique_failures, broken_handlers = extract_foundry_failure_totals(payload)
+                    if (
+                        totals_ts is not None
+                        and unique_failures is not None
+                        and broken_handlers is not None
+                    ):
+                        expected_events = unique_failures + broken_handlers
+                        missing_events = expected_events - len(seen)
+                        for _ in range(max(0, missing_events)):
+                            synthetic_handler_count += 1
+                            synthetic_name = f"foundry_handler_bug_{synthetic_handler_count}"
+                            if synthetic_name in seen:
+                                continue
+                            seen.add(synthetic_name)
+                            events.append(
+                                Event(
+                                    run_id=run_id,
+                                    instance_id=instance_id,
+                                    fuzzer=normalize_fuzzer(fuzzer_label),
+                                    fuzzer_label=fuzzer_label,
+                                    event=synthetic_name,
+                                    elapsed_seconds=totals_ts - (first_ts or totals_ts),
+                                    source="foundry-broken-handler-metric",
                                     log_path=str(path),
                                 )
                             )
