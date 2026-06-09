@@ -469,9 +469,17 @@ def extract_foundry_failure(payload: Dict[str, Any]) -> Tuple[Optional[str], Opt
         return None, None, None
 
     if str(payload.get("event") or "").strip() == "failure":
-        target_name = normalize_foundry_failure_name(payload.get("target"))
-        if target_name:
-            return target_name, ts_value, "foundry-failure-event"
+        # Prefer the per-invariant identity so distinct invariant failures are
+        # counted as distinct bugs. The `target` field is the harness contract
+        # (e.g. "CryticToFoundry"), which is identical across every invariant and
+        # would otherwise collapse all failures into a single bug. Fall back to
+        # `target` only when no invariant name is present.
+        failure_name = (
+            normalize_foundry_failure_name(payload.get("invariant"))
+            or normalize_foundry_failure_name(payload.get("target"))
+        )
+        if failure_name:
+            return failure_name, ts_value, "foundry-failure-event"
 
     if str(payload.get("type") or "").strip() == "invariant_failure":
         invariant_name = normalize_foundry_failure_name(payload.get("invariant"))
