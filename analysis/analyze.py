@@ -22,6 +22,12 @@ FOUNDATION_JSON_RE = re.compile(r"^\s*\{.*\}\s*$")
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 FALSIFIED_RE = re.compile(r"Test\s+([^\s]+)\s+falsified!")
 ECHIDNA_FAILED_RE = re.compile(r"^([A-Za-z0-9_]+)\([^)]*\):\s+failed!")
+FOUNDRY_FAIL_LINE_RE = re.compile(r"^\s*\[FAIL(?:[^\]]*)\]\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+FOUNDRY_TEST_RESULT_RE = re.compile(
+    r"^\s*(?:\[[^\]]+\]\s+)?(?:test|invariant)[A-Za-z0-9_]*\s*\(\)\s*:\s*(?:FAIL|failed)\b",
+    re.IGNORECASE,
+)
+FOUNDRY_RESULT_NAME_RE = re.compile(r"^\s*(?:\[[^\]]+\]\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 TX_RATE_PATTERNS = [
     re.compile(r"(?i)(?:tx|txn|transactions?|calls?)\s*(?:/|per)\s*s(?:ec(?:ond)?)?\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)"),
     re.compile(r"(?i)([0-9]+(?:\.[0-9]+)?)\s*(?:tx|txn|transactions?|calls?)\s*/\s*s(?:ec(?:ond)?)?\b"),
@@ -443,6 +449,19 @@ def normalize_foundry_failure_name(value: Any) -> Optional[str]:
     return name or None
 
 
+def extract_foundry_text_failure(line: str) -> Optional[str]:
+    fail_match = FOUNDRY_FAIL_LINE_RE.search(line)
+    if fail_match:
+        return normalize_foundry_failure_name(fail_match.group(1))
+
+    if FOUNDRY_TEST_RESULT_RE.search(line):
+        name_match = FOUNDRY_RESULT_NAME_RE.search(line)
+        if name_match:
+            return normalize_foundry_failure_name(name_match.group(1))
+
+    return None
+
+
 def extract_foundry_failure(payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[float], Optional[str]]:
     ts_value = parse_optional_float(payload.get("timestamp"))
     # We require timestamps to compute elapsed seconds in benchmark reports.
@@ -468,9 +487,16 @@ def parse_foundry_log(
     events: List[Event] = []
     seen = set()
     first_ts: Optional[float] = None
+    last_elapsed: Optional[float] = None
     with path.open("r", errors="ignore") as handle:
         for line in handle:
             clean_line = ANSI_ESCAPE_RE.sub("", line)
+            elapsed_match = MEDUSA_ELAPSED_RE.search(clean_line)
+            if elapsed_match:
+                parsed_elapsed = parse_duration(elapsed_match.group(1))
+                if parsed_elapsed is not None:
+                    last_elapsed = float(parsed_elapsed)
+
             if FOUNDATION_JSON_RE.match(clean_line):
                 try:
                     payload = json.loads(clean_line)
@@ -501,6 +527,22 @@ def parse_foundry_log(
                                 )
                             )
                     continue
+
+            event_name = extract_foundry_text_failure(clean_line)
+            if event_name and event_name not in seen:
+                seen.add(event_name)
+                events.append(
+                    Event(
+                        run_id=run_id,
+                        instance_id=instance_id,
+                        fuzzer=normalize_fuzzer(fuzzer_label),
+                        fuzzer_label=fuzzer_label,
+                        event=event_name,
+                        elapsed_seconds=last_elapsed or 0.0,
+                        source="foundry-text-failure",
+                        log_path=str(path),
+                    )
+                )
     return events
 
 

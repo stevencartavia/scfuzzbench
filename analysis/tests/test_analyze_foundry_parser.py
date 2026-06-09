@@ -85,6 +85,55 @@ class FoundryParserTests(unittest.TestCase):
         self.assertAlmostEqual(events[0].elapsed_seconds, 0.0)
         self.assertAlmostEqual(events[1].elapsed_seconds, 3.0)
 
+    def test_parses_foundry_text_failure_summary_lines(self):
+        log_path = self.write_log(
+            [
+                "fuzz: elapsed: 6s, calls: 61658 (20486/sec), seq/s: 211, branches hit: 537, corpus: 137, failures: 15/762, gas/s: 4500638777",
+                "Failing tests:",
+                "[FAIL: invariant broken] invariant_poolBalance() (runs: 256, calls: 3840, reverts: 0)",
+                "[FAIL: assertion failed] assert_healthFactor_ASSERTION_CANARY() (gas: 12345)",
+            ]
+        )
+
+        events = analyze.parse_foundry_log(log_path, "run-1", "i-1", "foundry-master")
+        self.assertEqual(
+            [event.event for event in events],
+            ["invariant_poolBalance", "assert_healthFactor_ASSERTION_CANARY"],
+        )
+        self.assertEqual(
+            [event.source for event in events],
+            ["foundry-text-failure", "foundry-text-failure"],
+        )
+        self.assertAlmostEqual(events[0].elapsed_seconds, 6.0)
+        self.assertAlmostEqual(events[1].elapsed_seconds, 6.0)
+
+    def test_parses_foundry_text_test_result_lines_without_elapsed(self):
+        log_path = self.write_log(
+            [
+                "[FAIL. Reason: invariant broken] invariant_debtAccounting(): FAIL",
+                "Suite result: FAILED. 0 passed; 1 failed; 0 skipped; finished in 5.00s",
+            ]
+        )
+
+        events = analyze.parse_foundry_log(log_path, "run-1", "i-1", "foundry-new")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event, "invariant_debtAccounting")
+        self.assertEqual(events[0].source, "foundry-text-failure")
+        self.assertAlmostEqual(events[0].elapsed_seconds, 0.0)
+
+    def test_dedupes_foundry_text_failures_against_json_failures(self):
+        log_path = self.write_log(
+            [
+                '{"timestamp":100,"event":"failure","target":"CryticToFoundry:invariant_a","type":"invariant"}',
+                "[FAIL: invariant broken] invariant_a() (runs: 256, calls: 3840, reverts: 0)",
+            ]
+        )
+
+        events = analyze.parse_foundry_log(log_path, "run-1", "i-1", "foundry-git-test")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event, "invariant_a")
+        self.assertEqual(events[0].source, "foundry-failure-event")
+
     def test_parses_throughput_from_json_cumulative_metrics(self):
         log_path = self.write_log(
             [
