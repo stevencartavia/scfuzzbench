@@ -52,8 +52,60 @@ fi
 
 set +e
 pushd "${repo_dir}" >/dev/null
-run_with_timeout "${log_file}" forge test --mc CryticToFoundry "${extra_args[@]}"
-exit_code=$?
+exit_code=0
+run_with_timeout "${log_file}" forge test --mc CryticToFoundry "${extra_args[@]}" || exit_code=$?
+
+showmap_enabled="${SCFUZZBENCH_FOUNDRY_SHOWMAP:-1}"
+if [[ "${showmap_enabled}" == "1" || "${showmap_enabled,,}" == "true" || "${showmap_enabled,,}" == "yes" ]]; then
+  showmap_dir="${SCFUZZBENCH_LOG_DIR}/showmap"
+  showmap_log_file="${SCFUZZBENCH_LOG_DIR}/foundry_showmap.log"
+  showmap_trial="${SCFUZZBENCH_RUN_ID:-${SCFUZZBENCH_INSTANCE_ID:-$(hostname)}}"
+  showmap_corpus_dir="${FOUNDRY_SHOWMAP_CORPUS_DIR:-${SCFUZZBENCH_CORPUS_DIR:-}}"
+  showmap_args=(
+    --showmap-out "${showmap_dir}"
+    --showmap-approach "${SCFUZZBENCH_FUZZER_LABEL}"
+    --showmap-trial "${showmap_trial}"
+  )
+  if [[ -n "${showmap_corpus_dir}" ]]; then
+    showmap_args+=(--showmap-corpus-dir "${showmap_corpus_dir}")
+  fi
+  if [[ -n "${FOUNDRY_SHOWMAP_DOMAIN:-}" ]]; then
+    showmap_args=(--showmap-domain "${FOUNDRY_SHOWMAP_DOMAIN}" "${showmap_args[@]}")
+  fi
+  mkdir -p "${showmap_dir}"
+  original_timeout="${SCFUZZBENCH_TIMEOUT_SECONDS:-}"
+  showmap_timeout="${SCFUZZBENCH_FOUNDRY_SHOWMAP_TIMEOUT_SECONDS:-}"
+  if [[ -z "${showmap_timeout}" ]]; then
+    showmap_timeout=1800
+    if [[ "${original_timeout}" =~ ^[0-9]+$ ]] && [[ "${original_timeout}" -gt 0 ]] && [[ "${original_timeout}" -lt "${showmap_timeout}" ]]; then
+      showmap_timeout="${original_timeout}"
+    fi
+  fi
+  SCFUZZBENCH_TIMEOUT_SECONDS="${showmap_timeout}"
+  replay_extra_args=()
+  skip_showmap_arg_value=0
+  for arg in "${extra_args[@]}"; do
+    if [[ "${skip_showmap_arg_value}" -eq 1 ]]; then
+      skip_showmap_arg_value=0
+      continue
+    fi
+    case "${arg}" in
+      --showmap-out|--showmap-approach|--showmap-trial|--showmap-corpus-dir|--showmap-domain)
+        skip_showmap_arg_value=1
+        ;;
+      --showmap-out=*|--showmap-approach=*|--showmap-trial=*|--showmap-corpus-dir=*|--showmap-domain=*)
+        ;;
+      *)
+        replay_extra_args+=("${arg}")
+        ;;
+    esac
+  done
+  run_with_timeout "${showmap_log_file}" forge test --mc CryticToFoundry "${replay_extra_args[@]}" "${showmap_args[@]}" || \
+    log "Foundry showmap replay failed; continuing with original forge test exit code ${exit_code}."
+  if [[ -n "${original_timeout}" ]]; then
+    SCFUZZBENCH_TIMEOUT_SECONDS="${original_timeout}"
+  fi
+fi
 popd >/dev/null
 set -e
 
