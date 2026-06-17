@@ -8,13 +8,17 @@ import re
 import shutil
 import statistics
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from differential_coverage import DifferentialCoverage
+@dataclass(frozen=True)
+class LogFile:
+    path: Path
+    instance_id: str
+    fuzzer_label: str
 
 LOG_FILE_RE = re.compile(r".+\.log$")
 INSTANCE_PREFIX_RE = re.compile(r"^(i-[0-9a-f]+)-(.*)$")
@@ -882,9 +886,8 @@ def parse_throughput_log(
     return samples
 
 
-def parse_logs(logs_dir: Path, run_id: Optional[str]) -> List[Event]:
-    events: List[Event] = []
-    run_id_value = run_id or infer_run_id(logs_dir) or "unknown"
+def discover_log_files(logs_dir: Path) -> Tuple[LogFile, ...]:
+    files: List[LogFile] = []
     for path in logs_dir.rglob("*"):
         if not path.is_file():
             continue
@@ -895,6 +898,21 @@ def parse_logs(logs_dir: Path, run_id: Optional[str]) -> List[Event]:
             continue
         instance_label = rel.parts[0]
         instance_id, fuzzer_label = split_instance_label(instance_label)
+        files.append(LogFile(path, instance_id, fuzzer_label))
+    return tuple(files)
+
+
+def parse_logs(
+    logs_dir: Path,
+    run_id: Optional[str],
+    log_files: Sequence[LogFile],
+) -> List[Event]:
+    events: List[Event] = []
+    run_id_value = run_id or infer_run_id(logs_dir) or "unknown"
+    for log_file in log_files:
+        path = log_file.path
+        instance_id = log_file.instance_id
+        fuzzer_label = log_file.fuzzer_label
         fuzzer = normalize_fuzzer(fuzzer_label)
         if fuzzer == "foundry":
             events.extend(parse_foundry_log(path, run_id_value, instance_id, fuzzer_label))
@@ -929,20 +947,22 @@ def parse_logs(logs_dir: Path, run_id: Optional[str]) -> List[Event]:
     return events
 
 
-def parse_throughput_logs(logs_dir: Path, run_id: Optional[str]) -> List[ThroughputSample]:
+def parse_throughput_logs(
+    logs_dir: Path,
+    run_id: Optional[str],
+    log_files: Sequence[LogFile],
+) -> List[ThroughputSample]:
     samples: List[ThroughputSample] = []
     run_id_value = run_id or infer_run_id(logs_dir) or "unknown"
-    for path in logs_dir.rglob("*"):
-        if not path.is_file():
-            continue
-        if not should_parse_log_file(path):
-            continue
-        rel = path.relative_to(logs_dir)
-        if len(rel.parts) < 2:
-            continue
-        instance_label = rel.parts[0]
-        instance_id, fuzzer_label = split_instance_label(instance_label)
-        samples.extend(parse_throughput_log(path, run_id_value, instance_id, fuzzer_label))
+    for log_file in log_files:
+        samples.extend(
+            parse_throughput_log(
+                log_file.path,
+                run_id_value,
+                log_file.instance_id,
+                log_file.fuzzer_label,
+            )
+        )
     return samples
 
 
@@ -1068,22 +1088,20 @@ def parse_progress_metrics_log(
 
 
 def parse_progress_metrics_logs(
-    logs_dir: Path, run_id: Optional[str]
+    logs_dir: Path,
+    run_id: Optional[str],
+    log_files: Sequence[LogFile],
 ) -> List[ProgressMetricsSample]:
     samples: List[ProgressMetricsSample] = []
     run_id_value = run_id or infer_run_id(logs_dir) or "unknown"
-    for path in logs_dir.rglob("*"):
-        if not path.is_file():
-            continue
-        if not should_parse_log_file(path):
-            continue
-        rel = path.relative_to(logs_dir)
-        if len(rel.parts) < 2:
-            continue
-        instance_label = rel.parts[0]
-        instance_id, fuzzer_label = split_instance_label(instance_label)
+    for log_file in log_files:
         samples.extend(
-            parse_progress_metrics_log(path, run_id_value, instance_id, fuzzer_label)
+            parse_progress_metrics_log(
+                log_file.path,
+                run_id_value,
+                log_file.instance_id,
+                log_file.fuzzer_label,
+            )
         )
     return samples
 
@@ -1579,21 +1597,20 @@ def parse_showmap_approach_dir(name: str) -> Tuple[str, Optional[str]]:
 
 def read_afl_showmap(path: Path) -> Set[str]:
     edges: Set[str] = set()
-    for line_number, raw_line in enumerate(
-        path.read_text(errors="ignore").splitlines(), 1
-    ):
-        line = raw_line.strip()
-        if not line:
-            continue
-        edge_id, sep, count_text = line.partition(":")
-        if not sep:
-            raise ValueError(f"invalid AFL showmap line {path}:{line_number}: {line}")
-        try:
-            count = int(count_text.strip())
-        except ValueError as exc:
-            raise ValueError(f"invalid AFL showmap count {path}:{line_number}: {line}") from exc
-        if count > 0:
-            edges.add(edge_id.strip())
+    with path.open("r", errors="ignore") as handle:
+        for line_number, raw_line in enumerate(handle, 1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            edge_id, sep, count_text = line.partition(":")
+            if not sep:
+                raise ValueError(f"invalid AFL showmap line {path}:{line_number}: {line}")
+            try:
+                count = int(count_text.strip())
+            except ValueError as exc:
+                raise ValueError(f"invalid AFL showmap count {path}:{line_number}: {line}") from exc
+            if count > 0:
+                edges.add(edge_id.strip())
     return edges
 
 
@@ -1701,20 +1718,66 @@ def write_showmap_campaign_dir(
 def calculate_relscores(
     campaign: Dict[str, Dict[str, Set[str]]],
 ) -> Dict[str, float]:
-    return dict(DifferentialCoverage(campaign).relscores())
+    approach_unions: Dict[str, Set[str]] = {}
+    approach_edge_hits: Dict[str, Counter[str]] = {}
+    approach_nonempty_trials: Dict[str, int] = {}
+
+    for approach, trials in campaign.items():
+        edge_hits: Counter[str] = Counter()
+        covered_edges: Set[str] = set()
+        nonempty_trials = 0
+        for edges in trials.values():
+            if not edges:
+                continue
+            nonempty_trials += 1
+            covered_edges.update(edges)
+            edge_hits.update(edges)
+        approach_unions[approach] = covered_edges
+        approach_edge_hits[approach] = edge_hits
+        approach_nonempty_trials[approach] = nonempty_trials
+
+    approach_count = len(approach_unions)
+    approach_hit_counts: Counter[str] = Counter()
+    for covered_edges in approach_unions.values():
+        approach_hit_counts.update(covered_edges)
+
+    scores: Dict[str, float] = {}
+    for approach, edge_hits in approach_edge_hits.items():
+        nonempty_trials = approach_nonempty_trials[approach]
+        if nonempty_trials == 0:
+            scores[approach] = 0.0
+            continue
+        score = 0.0
+        for edge, trials_that_hit_edge in edge_hits.items():
+            approaches_that_never_hit_edge = approach_count - approach_hit_counts[edge]
+            score += (
+                approaches_that_never_hit_edge
+                * trials_that_hit_edge
+                / nonempty_trials
+            )
+        scores[approach] = score
+    return scores
 
 
 def calculate_relcovs(
     campaign: Dict[str, Dict[str, Set[str]]],
 ) -> Dict[str, Dict[str, float]]:
-    dc = DifferentialCoverage(campaign)
-    return {
-        approach: {
-            reference: dc.approaches[approach].relcov(dc.approaches[reference])
-            for reference in dc.approaches
-        }
-        for approach in dc.approaches
+    reference_unions = {
+        approach: set().union(*trials.values()) for approach, trials in campaign.items()
     }
+    relcovs: Dict[str, Dict[str, float]] = {}
+    for approach, trials in campaign.items():
+        relcovs[approach] = {}
+        trial_edges = tuple(trials.values())
+        for reference, reference_edges in reference_unions.items():
+            if not reference_edges:
+                relcovs[approach][reference] = 0.0
+                continue
+            relcovs[approach][reference] = statistics.median(
+                len(edges.intersection(reference_edges)) / len(reference_edges)
+                for edges in trial_edges
+            )
+    return relcovs
 
 
 def showmap_campaign_summary(
@@ -1847,17 +1910,21 @@ def main() -> int:
     args = parse_args()
     raw_labels = getattr(args, "raw_labels", False)
     if args.command == "parse":
-        events = parse_logs(args.logs_dir, args.run_id)
+        log_files = discover_log_files(args.logs_dir)
+        events = parse_logs(args.logs_dir, args.run_id, log_files)
         if raw_labels:
             events = _apply_raw_labels_events(events)
         write_events_csv(events, args.out_csv)
         return 0
     if args.command == "run":
         out_dir: Path = args.out_dir
-        events = parse_logs(args.logs_dir, args.run_id)
-        throughput_samples = parse_throughput_logs(args.logs_dir, args.run_id)
+        log_files = discover_log_files(args.logs_dir)
+        events = parse_logs(args.logs_dir, args.run_id, log_files)
+        throughput_samples = parse_throughput_logs(
+            args.logs_dir, args.run_id, log_files
+        )
         progress_metrics_samples = parse_progress_metrics_logs(
-            args.logs_dir, args.run_id
+            args.logs_dir, args.run_id, log_files
         )
         if raw_labels:
             events = _apply_raw_labels_events(events)
