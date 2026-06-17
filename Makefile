@@ -122,7 +122,7 @@ terraform-destroy-infra:
 	terraform -chdir=$(TF_DIR) destroy $(TF_ARGS) -target=aws_instance.fuzzer -target=aws_iam_instance_profile.fuzzer -target=aws_iam_role_policy.s3_access -target=aws_iam_role.fuzzer -target=aws_key_pair.ssh -target=local_sensitive_file.ssh_private_key -target=tls_private_key.ssh -target=aws_security_group.ssh -target=aws_route_table_association.public -target=aws_route_table.public -target=aws_subnet.public -target=aws_internet_gateway.main -target=aws_vpc.main $(SCFUZZBENCH_COMMIT_ARG) $(EXISTING_BUCKET_ARG)
 
 analysis-venv:
-	uv run --with-requirements $(ANALYSIS_REQ) python -c "import sys; print(sys.executable)" >/dev/null
+	$(ANALYSIS_PY) -c "import sys; print(sys.executable)" >/dev/null
 
 results-analyze: analysis-venv
 	$(ANALYSIS_PY) analysis/analyze.py run --logs-dir $(LOGS_DIR) --out-dir $(OUT_DIR) $(RUN_ID_ARG) $(RAW_LABELS_ARG)
