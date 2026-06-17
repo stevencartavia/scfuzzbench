@@ -508,6 +508,17 @@ install_base_packages() {
   log_duration "install_base_packages" "${install_start}"
 }
 
+ensure_uv() {
+  if command -v uv >/dev/null 2>&1; then
+    return 0
+  fi
+
+  log "Installing uv"
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  export PATH="${HOME}/.local/bin:${PATH}"
+  command -v uv >/dev/null
+}
+
 install_foundry() {
   local install_start
   install_start=$(now_epoch_seconds)
@@ -567,7 +578,8 @@ install_crytic_compile() {
   local install_start
   install_start=$(now_epoch_seconds)
   log "Installing crytic-compile"
-  python3 -m pip install --no-cache-dir --break-system-packages crytic-compile
+  ensure_uv
+  UV_TOOL_BIN_DIR="${SCFUZZBENCH_BIN_DIR}" uv tool install --force crytic-compile
   command -v crytic-compile
   log_duration "install_crytic_compile" "${install_start}"
 }
@@ -576,7 +588,8 @@ install_slither_analyzer() {
   local install_start
   install_start=$(now_epoch_seconds)
   log "Installing slither-analyzer"
-  python3 -m pip install --no-cache-dir --break-system-packages --ignore-installed slither-analyzer
+  ensure_uv
+  UV_TOOL_BIN_DIR="${SCFUZZBENCH_BIN_DIR}" uv tool install --force slither-analyzer
   command -v slither
   log_duration "install_slither_analyzer" "${install_start}"
 }

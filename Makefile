@@ -5,9 +5,8 @@ BACKEND_INIT_FLAGS ?= -migrate-state -force-copy -input=false
 LOGS_DIR ?= logs
 OUT_DIR ?= analysis_out
 ANALYSIS_VENV ?= .venv-analysis
-ANALYSIS_PY ?= $(ANALYSIS_VENV)/bin/python
-ANALYSIS_PIP ?= $(ANALYSIS_VENV)/bin/pip
 ANALYSIS_REQ ?= analysis/requirements.txt
+ANALYSIS_PY ?= uv run --with-requirements $(ANALYSIS_REQ) python
 RUN_ID ?=
 AWS_PROFILE ?=
 BUCKET ?=
@@ -123,17 +122,16 @@ terraform-destroy-infra:
 	terraform -chdir=$(TF_DIR) destroy $(TF_ARGS) -target=aws_instance.fuzzer -target=aws_iam_instance_profile.fuzzer -target=aws_iam_role_policy.s3_access -target=aws_iam_role.fuzzer -target=aws_key_pair.ssh -target=local_sensitive_file.ssh_private_key -target=tls_private_key.ssh -target=aws_security_group.ssh -target=aws_route_table_association.public -target=aws_route_table.public -target=aws_subnet.public -target=aws_internet_gateway.main -target=aws_vpc.main $(SCFUZZBENCH_COMMIT_ARG) $(EXISTING_BUCKET_ARG)
 
 analysis-venv:
-	python3 -m venv $(ANALYSIS_VENV)
-	$(ANALYSIS_PIP) install -r $(ANALYSIS_REQ)
+	uv run --with-requirements $(ANALYSIS_REQ) python -c "import sys; print(sys.executable)" >/dev/null
 
 results-analyze: analysis-venv
 	$(ANALYSIS_PY) analysis/analyze.py run --logs-dir $(LOGS_DIR) --out-dir $(OUT_DIR) $(RUN_ID_ARG) $(RAW_LABELS_ARG)
 
 results-download:
-	python3 scripts/download_run_artifacts.py --bucket $(BUCKET) --run-id $(RUN_ID) $(BENCHMARK_UUID_ARG) --dest $(DEST) --category $(ARTIFACT_CATEGORY) $(PROFILE_ARG) $(NO_UNZIP_ARG)
+	$(ANALYSIS_PY) scripts/download_run_artifacts.py --bucket $(BUCKET) --run-id $(RUN_ID) $(BENCHMARK_UUID_ARG) --dest $(DEST) --category $(ARTIFACT_CATEGORY) $(PROFILE_ARG) $(NO_UNZIP_ARG)
 
 results-prepare:
-	python3 scripts/prepare_analysis_logs.py --unzipped-dir $(UNZIPPED_DIR) --out-dir $(ANALYSIS_LOGS_DIR)
+	$(ANALYSIS_PY) scripts/prepare_analysis_logs.py --unzipped-dir $(UNZIPPED_DIR) --out-dir $(ANALYSIS_LOGS_DIR)
 
 results-analyze-filtered: analysis-venv
 	$(ANALYSIS_PY) scripts/run_analysis_filtered.py --logs-dir $(ANALYSIS_LOGS_DIR) --out-dir $(ANALYSIS_OUT_DIR) $(RUN_ID_ARG) $(EXCLUDE_ARG) $(RAW_LABELS_ARG)
@@ -141,10 +139,10 @@ results-analyze-filtered: analysis-venv
 results-analyze-all: analysis-venv results-download results-prepare results-analyze-filtered report-events-to-cumulative report-benchmark report-invariant-overlap report-runner-metrics
 
 results-inspect:
-	python3 scripts/inspect_logs.py --logs-dir $(ANALYSIS_LOGS_DIR)
+	$(ANALYSIS_PY) scripts/inspect_logs.py --logs-dir $(ANALYSIS_LOGS_DIR)
 
 s3-purge-versions:
-	python3 scripts/purge_s3_versions.py --bucket $(BUCKET) $(PROFILE_ARG)
+	$(ANALYSIS_PY) scripts/purge_s3_versions.py --bucket $(BUCKET) $(PROFILE_ARG)
 
 report-benchmark: analysis-venv
 	$(ANALYSIS_PY) analysis/benchmark_report.py --csv $(REPORT_CSV) --report-outdir $(REPORT_OUT_DIR) --images-outdir $(IMAGES_OUT_DIR) $(REPORT_BUDGET_ARG) --grid_step_min $(REPORT_GRID_STEP_MIN) --checkpoints $(REPORT_CHECKPOINTS) --ks $(REPORT_KS) --throughput-summary-csv $(THROUGHPUT_SUMMARY_CSV) --throughput-samples-csv $(THROUGHPUT_SAMPLES_CSV) --progress-metrics-summary-csv $(PROGRESS_METRICS_SUMMARY_CSV) --progress-metrics-samples-csv $(PROGRESS_METRICS_SAMPLES_CSV) $(if $(REPORT_ANONYMIZE),--anonymize,)
