@@ -40,6 +40,18 @@ log() {
   echo "[$(date -Is)] $*" >&2
 }
 
+now_epoch_seconds() {
+  date +%s
+}
+
+log_duration() {
+  local label=$1
+  local start=$2
+  local end
+  end=$(now_epoch_seconds)
+  log "timing: ${label} completed in $((end - start))s"
+}
+
 retry_cmd() {
   local max_retries=${1:-5}
   local delay=${2:-60}
@@ -459,8 +471,11 @@ register_shutdown_trap() {
 }
 
 install_base_packages() {
+  local install_start
+  install_start=$(now_epoch_seconds)
   if is_local_mode; then
     log "Skipping system package installation (local mode)"
+    log_duration "install_base_packages" "${install_start}"
     return 0
   fi
   export DEBIAN_FRONTEND=noninteractive
@@ -490,9 +505,12 @@ install_base_packages() {
     rm -rf "${tmp_dir}"
     aws --version
   fi
+  log_duration "install_base_packages" "${install_start}"
 }
 
 install_foundry() {
+  local install_start
+  install_start=$(now_epoch_seconds)
   if [[ -n "${FOUNDRY_GIT_REPO:-}" ]]; then
     log "Installing Foundry from ${FOUNDRY_GIT_REPO}"
     if ! is_local_mode; then
@@ -519,17 +537,14 @@ install_foundry() {
     local commit
     commit=$(git -C "${tmp_dir}/foundry" rev-parse --short HEAD)
     log "Building Foundry at ${commit} with profile ${foundry_build_profile} on Rust ${foundry_rust_toolchain}"
-    # Build only the binaries we need (forge + cast); skip anvil/chisel to save
-    # build time. Select by `--bin` only: `--package cast` is ambiguous because a
-    # transitive `cast` crate shares the name with Foundry's `cast` package.
+    # The benchmark path only invokes forge; do not build extra Foundry binaries
+    # on every CI comparison side.
     cargo +"${foundry_rust_toolchain}" build \
       --locked \
       --profile "${foundry_build_profile}" \
       --bin forge \
-      --bin cast \
       --manifest-path "${tmp_dir}/foundry/Cargo.toml"
     install -m 0755 "${tmp_dir}/foundry/target/${foundry_build_profile}/forge" "${SCFUZZBENCH_BIN_DIR}/forge"
-    install -m 0755 "${tmp_dir}/foundry/target/${foundry_build_profile}/cast" "${SCFUZZBENCH_BIN_DIR}/cast"
     echo "${commit}" > "${SCFUZZBENCH_ROOT}/foundry_commit"
     echo "${FOUNDRY_GIT_REPO}" > "${SCFUZZBENCH_ROOT}/foundry_repo"
     rm -rf "${tmp_dir}"
@@ -545,18 +560,25 @@ install_foundry() {
     "${HOME}/.foundry/bin/foundryup" -i "${FOUNDRY_VERSION}"
     forge --version
   fi
+  log_duration "install_foundry" "${install_start}"
 }
 
 install_crytic_compile() {
+  local install_start
+  install_start=$(now_epoch_seconds)
   log "Installing crytic-compile"
   python3 -m pip install --no-cache-dir --break-system-packages crytic-compile
   command -v crytic-compile
+  log_duration "install_crytic_compile" "${install_start}"
 }
 
 install_slither_analyzer() {
+  local install_start
+  install_start=$(now_epoch_seconds)
   log "Installing slither-analyzer"
   python3 -m pip install --no-cache-dir --break-system-packages --ignore-installed slither-analyzer
   command -v slither
+  log_duration "install_slither_analyzer" "${install_start}"
 }
 
 imds_token() {
@@ -779,6 +801,8 @@ get_github_token() {
 }
 
 clone_target() {
+  local clone_start
+  clone_start=$(now_epoch_seconds)
   require_env SCFUZZBENCH_REPO_URL SCFUZZBENCH_COMMIT
   local repo_dir="${SCFUZZBENCH_WORKDIR}/target"
   local git_token=""
@@ -875,9 +899,12 @@ clone_target() {
   fi
 
   popd >/dev/null
+  log_duration "clone_target" "${clone_start}"
 }
 
 apply_benchmark_type() {
+  local mode_start
+  mode_start=$(now_epoch_seconds)
   local repo_dir="${SCFUZZBENCH_WORKDIR}/target"
   local mode="${SCFUZZBENCH_BENCHMARK_TYPE}"
   local properties_path="${SCFUZZBENCH_PROPERTIES_PATH}"
@@ -888,6 +915,7 @@ apply_benchmark_type() {
       log "Optimization mode requested, but SCFUZZBENCH_PROPERTIES_PATH is empty."
       return 1
     fi
+    log_duration "apply_benchmark_type" "${mode_start}"
     return 0
   fi
 
@@ -899,6 +927,7 @@ apply_benchmark_type() {
       log "Optimization mode requested, but Properties.sol is missing."
       return 1
     fi
+    log_duration "apply_benchmark_type" "${mode_start}"
     return 0
   fi
 
@@ -908,6 +937,7 @@ apply_benchmark_type() {
       log "Optimization mode requested, but Properties.sol does not support it."
       return 1
     fi
+    log_duration "apply_benchmark_type" "${mode_start}"
     return 0
   fi
 
@@ -943,9 +973,12 @@ apply_benchmark_type() {
       return 1
       ;;
   esac
+  log_duration "apply_benchmark_type" "${mode_start}"
 }
 
 build_target() {
+  local build_start
+  build_start=$(now_epoch_seconds)
   local repo_dir="${SCFUZZBENCH_WORKDIR}/target"
   log "Building target with forge"
   pushd "${repo_dir}" >/dev/null
@@ -955,12 +988,15 @@ build_target() {
   fi
   forge build
   popd >/dev/null
+  log_duration "build_target" "${build_start}"
 }
 
 run_with_timeout() {
   require_env SCFUZZBENCH_TIMEOUT_SECONDS
   local log_file=$1
   shift
+  local run_start
+  run_start=$(now_epoch_seconds)
   local kill_after="${SCFUZZBENCH_TIMEOUT_GRACE_SECONDS:-300}"
   if [[ ! "${kill_after}" =~ ^[0-9]+$ ]]; then
     kill_after=300
@@ -971,6 +1007,7 @@ run_with_timeout() {
   timeout --signal=SIGINT --kill-after="${kill_after}s" "${SCFUZZBENCH_TIMEOUT_SECONDS}s" "$@" 2>&1 | tee "${log_file}"
   local exit_code=${PIPESTATUS[0]}
   set -e
+  log_duration "run_with_timeout $(basename "${log_file}")" "${run_start}"
   if [[ "${exit_code}" -eq 124 ]]; then
     log "Command reached configured benchmark timeout; treating as completed run"
     return 0
@@ -979,8 +1016,11 @@ run_with_timeout() {
 }
 
 upload_results() {
+  local upload_start
+  upload_start=$(now_epoch_seconds)
   if is_local_mode; then
     save_results_local
+    log_duration "upload_results_local" "${upload_start}"
     return $?
   fi
   require_env SCFUZZBENCH_S3_BUCKET SCFUZZBENCH_RUN_ID SCFUZZBENCH_FUZZER_LABEL
@@ -1042,9 +1082,12 @@ upload_results() {
   fi
 
   export SCFUZZBENCH_UPLOAD_DONE=1
+  log_duration "upload_results" "${upload_start}"
 }
 
 save_results_local() {
+  local save_start
+  save_start=$(now_epoch_seconds)
   stop_runner_metrics || true
   cache_instance_id || true
   local fuzzer_label="${SCFUZZBENCH_FUZZER_LABEL:-unknown}"
@@ -1080,4 +1123,5 @@ save_results_local() {
 
   log "Results saved to ${output_dir}"
   export SCFUZZBENCH_UPLOAD_DONE=1
+  log_duration "save_results_local" "${save_start}"
 }

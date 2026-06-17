@@ -16,6 +16,8 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from differential_coverage import DifferentialCoverage
 
+LogFile = Tuple[Path, str, str]
+
 LOG_FILE_RE = re.compile(r".+\.log$")
 INSTANCE_PREFIX_RE = re.compile(r"^(i-[0-9a-f]+)-(.*)$")
 IGNORED_LOG_FILENAMES = {"runner_commands.log"}
@@ -882,9 +884,8 @@ def parse_throughput_log(
     return samples
 
 
-def parse_logs(logs_dir: Path, run_id: Optional[str]) -> List[Event]:
-    events: List[Event] = []
-    run_id_value = run_id or infer_run_id(logs_dir) or "unknown"
+def discover_log_files(logs_dir: Path) -> List[LogFile]:
+    files: List[LogFile] = []
     for path in logs_dir.rglob("*"):
         if not path.is_file():
             continue
@@ -895,6 +896,20 @@ def parse_logs(logs_dir: Path, run_id: Optional[str]) -> List[Event]:
             continue
         instance_label = rel.parts[0]
         instance_id, fuzzer_label = split_instance_label(instance_label)
+        files.append((path, instance_id, fuzzer_label))
+    return files
+
+
+def parse_logs(
+    logs_dir: Path,
+    run_id: Optional[str],
+    log_files: Optional[List[LogFile]] = None,
+) -> List[Event]:
+    events: List[Event] = []
+    run_id_value = run_id or infer_run_id(logs_dir) or "unknown"
+    for path, instance_id, fuzzer_label in (
+        log_files if log_files is not None else discover_log_files(logs_dir)
+    ):
         fuzzer = normalize_fuzzer(fuzzer_label)
         if fuzzer == "foundry":
             events.extend(parse_foundry_log(path, run_id_value, instance_id, fuzzer_label))
@@ -929,19 +944,16 @@ def parse_logs(logs_dir: Path, run_id: Optional[str]) -> List[Event]:
     return events
 
 
-def parse_throughput_logs(logs_dir: Path, run_id: Optional[str]) -> List[ThroughputSample]:
+def parse_throughput_logs(
+    logs_dir: Path,
+    run_id: Optional[str],
+    log_files: Optional[List[LogFile]] = None,
+) -> List[ThroughputSample]:
     samples: List[ThroughputSample] = []
     run_id_value = run_id or infer_run_id(logs_dir) or "unknown"
-    for path in logs_dir.rglob("*"):
-        if not path.is_file():
-            continue
-        if not should_parse_log_file(path):
-            continue
-        rel = path.relative_to(logs_dir)
-        if len(rel.parts) < 2:
-            continue
-        instance_label = rel.parts[0]
-        instance_id, fuzzer_label = split_instance_label(instance_label)
+    for path, instance_id, fuzzer_label in (
+        log_files if log_files is not None else discover_log_files(logs_dir)
+    ):
         samples.extend(parse_throughput_log(path, run_id_value, instance_id, fuzzer_label))
     return samples
 
@@ -1068,20 +1080,15 @@ def parse_progress_metrics_log(
 
 
 def parse_progress_metrics_logs(
-    logs_dir: Path, run_id: Optional[str]
+    logs_dir: Path,
+    run_id: Optional[str],
+    log_files: Optional[List[LogFile]] = None,
 ) -> List[ProgressMetricsSample]:
     samples: List[ProgressMetricsSample] = []
     run_id_value = run_id or infer_run_id(logs_dir) or "unknown"
-    for path in logs_dir.rglob("*"):
-        if not path.is_file():
-            continue
-        if not should_parse_log_file(path):
-            continue
-        rel = path.relative_to(logs_dir)
-        if len(rel.parts) < 2:
-            continue
-        instance_label = rel.parts[0]
-        instance_id, fuzzer_label = split_instance_label(instance_label)
+    for path, instance_id, fuzzer_label in (
+        log_files if log_files is not None else discover_log_files(logs_dir)
+    ):
         samples.extend(
             parse_progress_metrics_log(path, run_id_value, instance_id, fuzzer_label)
         )
