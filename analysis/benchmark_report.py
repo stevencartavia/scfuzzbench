@@ -624,9 +624,12 @@ def append_relative_scoreboard(
 
     lines.append("## Fuzzer scoreboard (higher is better)")
     lines.append(
-        "`relscore` is the benchmark-provided relative performance score; `relcov` is the "
-        "relative coverage score. A value of 1.000 is the best observed fuzzer for that "
-        "score, and lower values trail that leader."
+        "`relscore` orders approaches by coverage value: edges that fewer approaches reach "
+        "are worth more, and an approach gets more credit when it reaches those edges "
+        "consistently across non-empty trials. `relcov` is directional coverage overlap: "
+        "`relcov(A, B)` is the share of B's total reached coverage that A reaches. In this "
+        "scoreboard, higher values are better within each column; a normalized `relcov` of "
+        "1.000 means the largest observed coverage total for the selected report input."
     )
     if relscore_leaders:
         lines.append(

@@ -261,7 +261,8 @@ class BenchmarkReportTests(unittest.TestCase):
             report = outpath.read_text(encoding="utf-8")
 
             self.assertIn("## Fuzzer scoreboard (higher is better)", report)
-            self.assertIn("`relscore` is the benchmark-provided relative performance score", report)
+            self.assertIn("`relscore` orders approaches by coverage value", report)
+            self.assertIn("`relcov` is directional coverage overlap", report)
             self.assertIn("| 1 | echidna | 1.000 | 1.000 | best overall |", report)
             self.assertIn("| 2 | medusa | 0.444 | 0.500 | compare both scores |", report)
 
