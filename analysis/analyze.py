@@ -5,13 +5,23 @@ import json
 import math
 import os
 import re
+import shutil
 import statistics
 import sys
+import time
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+from differential_coverage import DifferentialCoverage
+
+@dataclass(frozen=True)
+class LogFile:
+    path: Path
+    instance_id: str
+    fuzzer_label: str
 
 LOG_FILE_RE = re.compile(r".+\.log$")
 INSTANCE_PREFIX_RE = re.compile(r"^(i-[0-9a-f]+)-(.*)$")
@@ -43,6 +53,8 @@ TEXT_TX_COUNT_PATTERNS = [
 TEXT_GAS_COUNT_PATTERNS = [
     re.compile(r"(?i)\bgas\s*:\s*([0-9]+(?:\.[0-9]+)?)"),
 ]
+
+DEFAULT_SHOWMAP_MAX_WORK_ITEMS = 50_000_000
 
 TX_RATE_KEYS = (
     "tx_per_second",
@@ -176,6 +188,18 @@ class ProgressMetricsSample:
     failure_rate: Optional[float]
     source: str
     log_path: str
+
+
+@dataclass(frozen=True)
+class ShowmapTrial:
+    instance_label: str
+    instance_id: str
+    fuzzer_label: str
+    approach: str
+    suite_test: Optional[str]
+    trial_id: str
+    raw_path: str
+    edges: Set[str]
 
 
 def parse_duration(text: str) -> Optional[int]:
@@ -496,7 +520,11 @@ def extract_foundry_failure_totals(payload: Dict[str, Any]) -> Tuple[Optional[fl
         return ts_value, None, None
 
     unique_failures = parse_optional_float(metrics.get("unique_failures"))
-    broken_handlers = parse_optional_float(metrics.get("broken_handlers"))
+    if unique_failures is None:
+        unique_failures = parse_optional_float(metrics.get("broken_invariants"))
+    broken_handlers = parse_optional_float(metrics.get("broken_assertions"))
+    if broken_handlers is None:
+        broken_handlers = parse_optional_float(metrics.get("broken_handlers"))
     return (
         ts_value,
         None if unique_failures is None else int(unique_failures),
@@ -867,9 +895,8 @@ def parse_throughput_log(
     return samples
 
 
-def parse_logs(logs_dir: Path, run_id: Optional[str]) -> List[Event]:
-    events: List[Event] = []
-    run_id_value = run_id or infer_run_id(logs_dir) or "unknown"
+def discover_log_files(logs_dir: Path) -> Tuple[LogFile, ...]:
+    files: List[LogFile] = []
     for path in logs_dir.rglob("*"):
         if not path.is_file():
             continue
@@ -880,6 +907,21 @@ def parse_logs(logs_dir: Path, run_id: Optional[str]) -> List[Event]:
             continue
         instance_label = rel.parts[0]
         instance_id, fuzzer_label = split_instance_label(instance_label)
+        files.append(LogFile(path, instance_id, fuzzer_label))
+    return tuple(files)
+
+
+def parse_logs(
+    logs_dir: Path,
+    run_id: Optional[str],
+    log_files: Sequence[LogFile],
+) -> List[Event]:
+    events: List[Event] = []
+    run_id_value = run_id or infer_run_id(logs_dir) or "unknown"
+    for log_file in log_files:
+        path = log_file.path
+        instance_id = log_file.instance_id
+        fuzzer_label = log_file.fuzzer_label
         fuzzer = normalize_fuzzer(fuzzer_label)
         if fuzzer == "foundry":
             events.extend(parse_foundry_log(path, run_id_value, instance_id, fuzzer_label))
@@ -914,20 +956,22 @@ def parse_logs(logs_dir: Path, run_id: Optional[str]) -> List[Event]:
     return events
 
 
-def parse_throughput_logs(logs_dir: Path, run_id: Optional[str]) -> List[ThroughputSample]:
+def parse_throughput_logs(
+    logs_dir: Path,
+    run_id: Optional[str],
+    log_files: Sequence[LogFile],
+) -> List[ThroughputSample]:
     samples: List[ThroughputSample] = []
     run_id_value = run_id or infer_run_id(logs_dir) or "unknown"
-    for path in logs_dir.rglob("*"):
-        if not path.is_file():
-            continue
-        if not should_parse_log_file(path):
-            continue
-        rel = path.relative_to(logs_dir)
-        if len(rel.parts) < 2:
-            continue
-        instance_label = rel.parts[0]
-        instance_id, fuzzer_label = split_instance_label(instance_label)
-        samples.extend(parse_throughput_log(path, run_id_value, instance_id, fuzzer_label))
+    for log_file in log_files:
+        samples.extend(
+            parse_throughput_log(
+                log_file.path,
+                run_id_value,
+                log_file.instance_id,
+                log_file.fuzzer_label,
+            )
+        )
     return samples
 
 
@@ -1053,22 +1097,20 @@ def parse_progress_metrics_log(
 
 
 def parse_progress_metrics_logs(
-    logs_dir: Path, run_id: Optional[str]
+    logs_dir: Path,
+    run_id: Optional[str],
+    log_files: Sequence[LogFile],
 ) -> List[ProgressMetricsSample]:
     samples: List[ProgressMetricsSample] = []
     run_id_value = run_id or infer_run_id(logs_dir) or "unknown"
-    for path in logs_dir.rglob("*"):
-        if not path.is_file():
-            continue
-        if not should_parse_log_file(path):
-            continue
-        rel = path.relative_to(logs_dir)
-        if len(rel.parts) < 2:
-            continue
-        instance_label = rel.parts[0]
-        instance_id, fuzzer_label = split_instance_label(instance_label)
+    for log_file in log_files:
         samples.extend(
-            parse_progress_metrics_log(path, run_id_value, instance_id, fuzzer_label)
+            parse_progress_metrics_log(
+                log_file.path,
+                run_id_value,
+                log_file.instance_id,
+                log_file.fuzzer_label,
+            )
         )
     return samples
 
@@ -1545,6 +1587,403 @@ def write_exclusive_csv(events: Iterable[Event], out_path: Path) -> None:
                 writer.writerow([fuzzer, event])
 
 
+def sanitize_showmap_component(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return "unknown"
+    sanitized = re.sub(r"[^A-Za-z0-9_.=-]+", "_", value)
+    if sanitized in {".", ".."}:
+        return "unknown"
+    return sanitized
+
+
+def parse_showmap_approach_dir(name: str) -> Tuple[str, Optional[str]]:
+    parts = [part for part in name.split("__") if part]
+    if len(parts) >= 2:
+        return parts[0], "__".join(parts[1:])
+    return name, None
+
+
+def read_afl_showmap(path: Path) -> Set[str]:
+    edges: Set[str] = set()
+    for line_number, raw_line in enumerate(
+        path.read_text(errors="ignore").splitlines(), 1
+    ):
+        line = raw_line.strip()
+        if not line:
+            continue
+        edge_id, sep, count_text = line.partition(":")
+        if not sep:
+            raise ValueError(f"invalid AFL showmap line {path}:{line_number}: {line}")
+        try:
+            count = int(count_text.strip())
+        except ValueError as exc:
+            raise ValueError(f"invalid AFL showmap count {path}:{line_number}: {line}") from exc
+        if count > 0:
+            edges.add(edge_id.strip())
+    return edges
+
+
+def load_showmap_trials(
+    logs_dir: Path,
+    excluded_fuzzers: Optional[Set[str]] = None,
+) -> Tuple[List[ShowmapTrial], List[Dict[str, str]]]:
+    trials: List[ShowmapTrial] = []
+    skipped: List[Dict[str, str]] = []
+    excluded_fuzzers = excluded_fuzzers or set()
+
+    for showmap_dir in sorted(path for path in logs_dir.rglob("showmap") if path.is_dir()):
+        rel_showmap_dir = showmap_dir.relative_to(logs_dir)
+        if not rel_showmap_dir.parts:
+            continue
+        instance_label = rel_showmap_dir.parts[0]
+        instance_id, fuzzer_label = split_instance_label(instance_label)
+
+        for trial_file in sorted(showmap_dir.rglob("*.txt")):
+            rel_trial = trial_file.relative_to(showmap_dir)
+            if len(rel_trial.parts) < 2:
+                skipped.append({"path": str(trial_file), "reason": "missing approach directory"})
+                continue
+
+            approach, suite_test = parse_showmap_approach_dir(rel_trial.parts[0])
+            if (
+                approach.lower() in excluded_fuzzers
+                or normalize_fuzzer(approach).lower() in excluded_fuzzers
+                or fuzzer_label.lower() in excluded_fuzzers
+                or normalize_fuzzer(fuzzer_label).lower() in excluded_fuzzers
+            ):
+                continue
+
+            try:
+                edges = read_afl_showmap(trial_file)
+            except ValueError as exc:
+                skipped.append({"path": str(trial_file), "reason": str(exc)})
+                continue
+            if not edges:
+                skipped.append({"path": str(trial_file), "reason": "empty coverage"})
+                continue
+
+            trial_rel = Path(*rel_trial.parts[1:]).with_suffix("")
+            trial_name = "__".join(trial_rel.parts)
+            trial_id = sanitize_showmap_component(f"{instance_label}__{trial_name}")
+            trials.append(
+                ShowmapTrial(
+                    instance_label=instance_label,
+                    instance_id=instance_id,
+                    fuzzer_label=fuzzer_label,
+                    approach=sanitize_showmap_component(approach),
+                    suite_test=(
+                        sanitize_showmap_component(suite_test)
+                        if suite_test is not None
+                        else None
+                    ),
+                    trial_id=trial_id,
+                    raw_path=str(trial_file),
+                    edges=edges,
+                )
+            )
+    return trials, skipped
+
+
+def merge_edges(
+    target: Dict[str, Dict[str, Set[str]]],
+    approach: str,
+    trial_id: str,
+    edges: Set[str],
+) -> None:
+    target.setdefault(approach, {}).setdefault(trial_id, set()).update(edges)
+
+
+def build_showmap_campaigns(
+    trials: Iterable[ShowmapTrial],
+) -> Dict[str, Dict[str, Dict[str, Set[str]]]]:
+    campaigns: Dict[str, Dict[str, Dict[str, Set[str]]]] = {"combined": {}}
+    for trial in trials:
+        merge_edges(campaigns["combined"], trial.approach, trial.trial_id, trial.edges)
+        if trial.suite_test is not None:
+            campaign_name = f"by_test/{trial.suite_test}"
+            merge_edges(
+                campaigns.setdefault(campaign_name, {}),
+                trial.approach,
+                trial.trial_id,
+                trial.edges,
+            )
+    return campaigns
+
+
+def write_showmap_campaign_dir(
+    campaign: Dict[str, Dict[str, Set[str]]],
+    out_dir: Path,
+) -> None:
+    for approach, trials in sorted(campaign.items()):
+        approach_dir = out_dir / approach
+        approach_dir.mkdir(parents=True, exist_ok=True)
+        for trial_id, edges in sorted(trials.items()):
+            trial_path = approach_dir / f"{trial_id}.txt"
+            with trial_path.open("w", encoding="utf-8") as handle:
+                for edge in sorted(edges):
+                    handle.write(f"{edge}:1\n")
+
+
+def showmap_campaign_work_items(campaign: Dict[str, Dict[str, Set[str]]]) -> int:
+    unique_edges: Set[str] = set()
+    trial_count = 0
+    for trials in campaign.values():
+        trial_count += len(trials)
+        for edges in trials.values():
+            unique_edges.update(edges)
+    return len(unique_edges) * max(trial_count, 1)
+
+
+def calculate_relscores(
+    campaign: Dict[str, Dict[str, Set[str]]],
+) -> Dict[str, float]:
+    return dict(DifferentialCoverage(campaign).relscores())
+
+
+def calculate_relcovs(
+    campaign: Dict[str, Dict[str, Set[str]]],
+) -> Dict[str, Dict[str, float]]:
+    dc = DifferentialCoverage(campaign)
+    return {
+        approach: {
+            reference: dc.approaches[approach].relcov(dc.approaches[reference])
+            for reference in dc.approaches
+        }
+        for approach in dc.approaches
+    }
+
+
+def find_baseline_candidate(approaches: Iterable[str]) -> Optional[Tuple[str, str]]:
+    approaches = sorted(approaches)
+    if len(approaches) != 2:
+        return None
+
+    baseline_names = {"master", "main", "stable"}
+
+    def is_baseline(name: str) -> bool:
+        lower = name.lower()
+        return lower in baseline_names or lower.endswith("-master") or lower.endswith("-main")
+
+    baselines = [approach for approach in approaches if is_baseline(approach)]
+    if len(baselines) != 1:
+        return None
+
+    baseline = baselines[0]
+    candidate = next(approach for approach in approaches if approach != baseline)
+    return baseline, candidate
+
+
+def differential_coverage_verdict(
+    candidate_covers_baseline: float,
+    candidate_relscore: float,
+    baseline_relscore: float,
+) -> str:
+    if candidate_covers_baseline < 0.95 or candidate_relscore < 0.98 * baseline_relscore:
+        return "regression"
+    if candidate_covers_baseline >= 0.98 and candidate_relscore >= baseline_relscore:
+        return "improvement"
+    if 0.95 <= candidate_covers_baseline < 0.98 and candidate_relscore > baseline_relscore:
+        return "mixed-results"
+    return "inconclusive"
+
+
+def build_differential_coverage_summary_rows(
+    campaign_name: str,
+    relscores: Dict[str, float],
+    relcovs: Dict[str, Dict[str, float]],
+) -> List[Tuple[str, str, str, str, float, float, float, float, float]]:
+    pair = find_baseline_candidate(relcovs.keys())
+    if pair is None:
+        return []
+    baseline, candidate = pair
+    if baseline not in relscores or candidate not in relscores:
+        return []
+
+    candidate_covers_baseline = relcovs.get(candidate, {}).get(baseline)
+    baseline_covers_candidate = relcovs.get(baseline, {}).get(candidate)
+    if candidate_covers_baseline is None or baseline_covers_candidate is None:
+        return []
+
+    baseline_relscore = relscores[baseline]
+    candidate_relscore = relscores[candidate]
+    verdict = differential_coverage_verdict(
+        candidate_covers_baseline, candidate_relscore, baseline_relscore
+    )
+    relscore_ratio = candidate_relscore / baseline_relscore if baseline_relscore else 0.0
+    return [
+        (
+            campaign_name,
+            baseline,
+            candidate,
+            verdict,
+            candidate_covers_baseline,
+            baseline_covers_candidate,
+            baseline_relscore,
+            candidate_relscore,
+            relscore_ratio,
+        )
+    ]
+
+
+def showmap_campaign_summary(
+    campaign: Dict[str, Dict[str, Set[str]]],
+) -> Dict[str, Dict[str, int]]:
+    summary: Dict[str, Dict[str, int]] = {}
+    for approach, trials in campaign.items():
+        covered_edges: Set[str] = set()
+        for edges in trials.values():
+            covered_edges.update(edges)
+        summary[approach] = {
+            "trials": len(trials),
+            "covered_edges": len(covered_edges),
+        }
+    return summary
+
+
+def showmap_max_work_items_from_env() -> int:
+    raw = os.environ.get("SCFUZZBENCH_DIFFCOV_MAX_WORK_ITEMS")
+    if raw is None or raw == "":
+        return DEFAULT_SHOWMAP_MAX_WORK_ITEMS
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_SHOWMAP_MAX_WORK_ITEMS
+    return max(value, 0)
+
+
+def write_differential_coverage_outputs(
+    logs_dir: Path,
+    out_dir: Path,
+    excluded_fuzzers: Optional[Set[str]] = None,
+    max_work_items: Optional[int] = None,
+) -> None:
+    trials, skipped = load_showmap_trials(logs_dir, excluded_fuzzers)
+    campaigns = build_showmap_campaigns(trials)
+    campaign_root = out_dir / "showmap_campaigns"
+    if campaign_root.exists():
+        shutil.rmtree(campaign_root)
+
+    relscore_rows: List[Tuple[str, str, float, int, int]] = []
+    relcov_rows: List[Tuple[str, str, str, float]] = []
+    summary_rows: List[Tuple[str, str, str, str, float, float, float, float, float]] = []
+    manifest: Dict[str, Any] = {
+        "raw_trials": len(trials),
+        "skipped": skipped,
+        "campaigns": {},
+    }
+    if max_work_items is None:
+        max_work_items = showmap_max_work_items_from_env()
+    manifest["max_work_items"] = max_work_items
+
+    for campaign_name, campaign in sorted(campaigns.items()):
+        if not campaign:
+            continue
+        start = time.perf_counter()
+        campaign_dir = campaign_root / campaign_name
+        write_showmap_campaign_dir(campaign, campaign_dir)
+        summary = showmap_campaign_summary(campaign)
+        work_items = showmap_campaign_work_items(campaign)
+        manifest["campaigns"][campaign_name] = {
+            "approaches": summary,
+            "work_items": work_items,
+        }
+        if campaign_name != "combined" and max_work_items and work_items > max_work_items:
+            manifest["campaigns"][campaign_name]["skipped_analysis"] = (
+                f"work_items {work_items} exceeds max_work_items {max_work_items}"
+            )
+            continue
+        relscores = calculate_relscores(campaign)
+        for approach, score in sorted(
+            relscores.items(), key=lambda item: (-item[1], item[0])
+        ):
+            relscore_rows.append(
+                (
+                    campaign_name,
+                    approach,
+                    score,
+                    summary[approach]["trials"],
+                    summary[approach]["covered_edges"],
+                )
+            )
+        relcovs = calculate_relcovs(campaign)
+        for approach, references in sorted(relcovs.items()):
+            for reference, relcov in sorted(references.items()):
+                if approach == reference:
+                    continue
+                relcov_rows.append((campaign_name, approach, reference, relcov))
+        summary_rows.extend(
+            build_differential_coverage_summary_rows(campaign_name, relscores, relcovs)
+        )
+        manifest["campaigns"][campaign_name]["analysis_seconds"] = round(
+            time.perf_counter() - start, 6
+        )
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    relscore_csv = out_dir / "differential_coverage_relscores.csv"
+    with relscore_csv.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["campaign", "approach", "relscore", "trials", "covered_edges"])
+        for campaign_name, approach, score, trials_count, covered_edges in relscore_rows:
+            writer.writerow(
+                [campaign_name, approach, f"{score:.6f}", trials_count, covered_edges]
+            )
+
+    relcov_csv = out_dir / "differential_coverage_relcov.csv"
+    with relcov_csv.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["campaign", "approach", "reference_approach", "relcov"])
+        for campaign_name, approach, reference, relcov in relcov_rows:
+            writer.writerow([campaign_name, approach, reference, f"{relcov:.6f}"])
+
+    summary_csv = out_dir / "differential_coverage_summary.csv"
+    with summary_csv.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "campaign",
+                "baseline",
+                "candidate",
+                "verdict",
+                "candidate_covers_baseline",
+                "baseline_covers_candidate",
+                "baseline_relscore",
+                "candidate_relscore",
+                "relscore_ratio",
+            ]
+        )
+        for row in summary_rows:
+            (
+                campaign_name,
+                baseline,
+                candidate,
+                verdict,
+                candidate_covers_baseline,
+                baseline_covers_candidate,
+                baseline_relscore,
+                candidate_relscore,
+                relscore_ratio,
+            ) = row
+            writer.writerow(
+                [
+                    campaign_name,
+                    baseline,
+                    candidate,
+                    verdict,
+                    f"{candidate_covers_baseline:.6f}",
+                    f"{baseline_covers_candidate:.6f}",
+                    f"{baseline_relscore:.6f}",
+                    f"{candidate_relscore:.6f}",
+                    f"{relscore_ratio:.6f}",
+                ]
+            )
+
+    manifest_path = out_dir / "showmap_campaign_manifest.json"
+    with manifest_path.open("w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Analyze scfuzzbench logs.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1593,17 +2032,21 @@ def main() -> int:
     args = parse_args()
     raw_labels = getattr(args, "raw_labels", False)
     if args.command == "parse":
-        events = parse_logs(args.logs_dir, args.run_id)
+        log_files = discover_log_files(args.logs_dir)
+        events = parse_logs(args.logs_dir, args.run_id, log_files)
         if raw_labels:
             events = _apply_raw_labels_events(events)
         write_events_csv(events, args.out_csv)
         return 0
     if args.command == "run":
         out_dir: Path = args.out_dir
-        events = parse_logs(args.logs_dir, args.run_id)
-        throughput_samples = parse_throughput_logs(args.logs_dir, args.run_id)
+        log_files = discover_log_files(args.logs_dir)
+        events = parse_logs(args.logs_dir, args.run_id, log_files)
+        throughput_samples = parse_throughput_logs(
+            args.logs_dir, args.run_id, log_files
+        )
         progress_metrics_samples = parse_progress_metrics_logs(
-            args.logs_dir, args.run_id
+            args.logs_dir, args.run_id, log_files
         )
         if raw_labels:
             events = _apply_raw_labels_events(events)
@@ -1631,6 +2074,7 @@ def main() -> int:
         write_progress_metrics_summary_csv(
             progress_metrics_samples, progress_metrics_summary_csv
         )
+        write_differential_coverage_outputs(args.logs_dir, out_dir)
         return 0
     return 1
 
